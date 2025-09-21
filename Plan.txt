@@ -1,0 +1,391 @@
+### **Plan de Desarrollo Detallado: API de Fechas Hábiles en Colombia**
+
+Este documento es un plan de implementación paso a paso para construir la API de cálculo de fechas hábiles, alineado con los requisitos de `Solicitud.txt` y siguiendo una arquitectura limpia y profesional.
+
+---
+
+#### **Fase 1: Configuración del Entorno y Arquitectura del Proyecto**
+
+**Objetivo:** Establecer una base de proyecto limpia, enfocada y escalable.
+
+1.  **Crear Directorio y Proyecto Node.js:**
+    *   `mkdir ColombianBusinessDates && cd ColombianBusinessDates`
+    *   `npm init -y`
+
+2.  **Instalar TypeScript y Tipos de Node:**
+    *   `npm install typescript @types/node ts-node --save-dev`
+
+3.  **Crear Archivo `.gitignore`:**
+    *   Crear un archivo `.gitignore` en la raíz para excluir `node_modules`, archivos de entorno y el directorio de compilación.
+        ```
+        /node_modules
+        /dist
+        .env
+        ```
+
+4.  **Crear y Configurar `tsconfig.json`:**
+    *   `npx tsc --init` y modificar el archivo para que coincida con esta configuración:
+        ```json
+        {
+          "compilerOptions": {
+            "target": "ES2020",
+            "module": "commonjs",
+            "outDir": "./dist",
+            "rootDir": "./src",
+            "strict": true,
+            "esModuleInterop": true,
+            "skipLibCheck": true,
+            "experimentalDecorators": true,
+            "emitDecoratorMetadata": true,
+            "resolveJsonModule": true
+          },
+          "include": ["src/**/*"],
+          "exclude": ["node_modules", "**/*.test.ts"]
+        }
+        ```
+
+5.  **Instalar Dependencias de Producción y Desarrollo:**
+    *   **Producción:** `npm install express date-fns date-fns-tz axios axios-retry zod dotenv pino helmet express-rate-limit`
+    *   **Desarrollo:** `npm install @types/express @types/jest jest ts-jest pino-pretty @asteasolutions/zod-to-openapi swagger-jsdoc swagger-ui-express @types/swagger-jsdoc @types/swagger-ui-express --save-dev`
+
+6.  **Configurar Scripts de NPM:**
+    *   Modificar el archivo `package.json` para añadir los scripts de ejecución y prueba:
+        ```json
+        "scripts": {
+          "start": "ts-node src/shared/web/App.ts",
+          "test": "jest"
+        }
+        ```
+
+7.  **Crear Configuración de Jest:**
+    *   Crear un archivo `jest.config.js` para que Jest funcione con TypeScript:
+        ```javascript
+        module.exports = {
+          preset: 'ts-jest',
+          testEnvironment: 'node',
+        };
+        ```
+
+8.  **Crear Estructura de Carpetas (Enfocada y Limpia):**
+    *   Esta es la estructura final, eliminando componentes no requeridos.
+        ```
+        src/
+        ├── features/
+        │   └── business-date-calculator/
+        │       ├── dateCalculator.controller.ts
+        │       └── dateCalculator.schema.ts
+        ├── domain/
+        │   ├── ports/
+        │   │   ├── IDateCalculator.ts
+        │   │   └── IHolidayProvider.ts
+        │   └── errors.ts
+        └── shared/
+            ├── infrastructure/
+            │   ├── services/
+            │   │   ├── HolidayApiProvider.ts
+            │   │   └── DateCalculator.service.ts
+            │   └── logging/
+            │       └── logger.ts
+            └── web/
+                ├── openapi/
+                │   └── swagger.config.ts
+                ├── routes/
+                │   └── dateCalculator.routes.ts
+                ├── App.ts
+                └── middlewares/
+                    └── errorHandler.ts
+        ```
+
+---
+
+#### **Fase 2: Definición del Dominio (El Núcleo Abstracto)**
+
+**Objetivo:** Definir los contratos (interfaces) y los errores de negocio que forman el lenguaje de la aplicación.
+
+1.  **Definir Puertos (Interfaces) en `src/domain/ports/`:**
+    *   **`IHolidayProvider.ts`**: Define cómo se obtienen los festivos.
+        ```typescript
+        export interface IHolidayProvider {
+          // Se devuelve un Set de strings 'YYYY-MM-DD' para evitar problemas de timezone.
+          getHolidays(year: number): Promise<Set<string>>;
+        }
+        ```
+    *   **`IDateCalculator.ts`**: Define la operación central de cálculo.
+        ```typescript
+        export interface IDateCalculatorParams {
+          startDate: Date;
+          days?: number;
+          hours?: number;
+        }
+
+        export interface IDateCalculator {
+          calculateBusinessDate(params: IDateCalculatorParams): Promise<Date>;
+        }
+        ```
+
+2.  **Definir Errores Personalizados en `src/domain/errors.ts`:**
+    *   Crear clases de error para un manejo predecible.
+        ```typescript
+        export class BaseError extends Error {
+          public readonly statusCode: number;
+          constructor(name: string, statusCode: number, message: string) {
+            super(message);
+            this.name = name;
+            this.statusCode = statusCode;
+          }
+        }
+
+        export class InvalidInputError extends BaseError {
+          constructor(message: string) {
+            super("InvalidInputError", 400, message);
+          }
+        }
+
+        export class HolidayApiError extends BaseError {
+          constructor(message: string) {
+            super("HolidayApiError", 503, "The holiday service is unavailable.");
+          }
+        }
+        ```
+
+---
+
+#### **Fase 3: Implementación de la Lógica de Negocio**
+
+**Objetivo:** Implementar los contratos del dominio con la lógica de negocio específica de `Solicitud.txt`.
+
+1.  **Implementar `HolidayApiProvider.ts` en `src/shared/infrastructure/services/`:**
+    *   Esta clase implementará `IHolidayProvider`.
+    *   Tendrá un caché simple en memoria (`private cache: Map<number, Set<string>> = new Map();`) para evitar llamadas repetidas.
+    *   El método `getHolidays` hará lo siguiente:
+        1.  Verificar si los festivos para el `year` solicitado ya están en el `cache`. Si es así, los devuelve.
+        2.  Si no, usar `axios` (configurado con `axios-retry`) para hacer un `GET` a `https://content.capta.co/Recruitment/WorkingDays.json`.
+        3.  **Almacenar la respuesta (array de strings `YYYY-MM-DD`) en un `Set<string>` para búsquedas O(1). No se convierten a objetos `Date` para evitar problemas de zona horaria.**
+        4.  Guardar el `Set` en el `cache` usando el año como clave.
+        5.  Devolver el resultado.
+        6.  Manejar errores con la clase `HolidayApiError`. Esto incluye fallos de red y errores de validación. Para esto último, se debe usar un esquema de `zod` que valide que la respuesta de la API sea un array de strings con formato `YYYY-MM-DD`. Si la validación falla, se debe lanzar un `HolidayApiError` indicando que los datos recibidos son corruptos.
+
+
+2.  **Implementar `DateCalculator.service.ts` en `src/shared/infrastructure/services/`:**
+    *   Esta clase implementará `IDateCalculator` y recibirá una instancia de `IHolidayProvider` en su constructor (Inyección de Dependencias).
+    *   El método `calculateBusinessDate` seguirá este algoritmo detallado y condicional:
+
+        1.  **Inicialización:**
+            *   Recibir `startDate` (UTC), `days` y `hours`.
+            *   Convertir `startDate` a la zona horaria de Colombia (`America/Bogota`). Esta será la `currentDate`.
+            *   Obtener los festivos para los años relevantes usando el `holidayProvider`.
+
+        2.  **Lógica de Cálculo Principal:**
+            *   **CASO A: Si `days` tiene un valor (incluso si `hours` también lo tiene):**
+                1.  **Ajuste hacia atrás:** Si `currentDate` es un momento no hábil (fin de semana, festivo, fuera de `[08:00, 17:00)`, o almuerzo `[12:00, 13:00)`), se ajusta **hacia atrás** a la última hora hábil válida (ej. 12:30pm -> 11:00am; Sábado 10am -> Viernes 4pm).
+                2.  **Suma de Días:** Iterar `days` veces. En cada iteración, avanzar 1 día en el calendario y luego usar un bucle para seguir avanzando hasta que la fecha no sea fin de semana ni festivo. La hora del día se mantiene.
+                3.  **Suma de Horas (si aplica):** Si se proporcionó `hours`, sumarlas usando el algoritmo de suma por bloques de horas a partir de la fecha resultante del paso anterior.
+
+            *   **CASO B: Si solo `hours` tiene un valor:**
+                1.  **Ajuste hacia adelante:** Si `currentDate` es un momento no hábil, se ajusta **hacia adelante** al inicio de la siguiente hora hábil disponible (ej. Viernes 5pm -> Lunes 8am; Martes 12:30pm -> Martes 1pm).
+                2.  **Suma de Horas:** Sumar las `hours` usando el algoritmo de suma por bloques a partir de la fecha ya ajustada.
+
+        3.  **Algoritmo de Suma de Horas por Bloques:**
+            *   Este sub-algoritmo se usa en los dos casos anteriores.
+            *   **Paso 1: Sumar en día actual.** Calcular las horas hábiles restantes en el día. Si las horas a sumar caben, se suman directamente, saltando el almuerzo si es necesario.
+            *   **Paso 2: Sumar días completos.** Si quedan horas, convertirlas a días hábiles (1 día = 8 horas) y avanzar esa cantidad de días hábiles.
+            *   **Paso 3: Sumar horas restantes.** Iniciar en el siguiente día hábil a las 8 a.m. y sumar las horas que queden.
+
+        4.  **Resultado Final:**
+            *   Al terminar, la `currentDate` (en zona horaria de Colombia) es el resultado.
+            *   Convertir esta `currentDate` de vuelta a UTC.
+            *   Devolver el objeto `Date` en UTC.
+
+---
+
+#### **Fase 4: Capa de API, Ruteo y Validación**
+
+**Objetivo:** Exponer la lógica de negocio a través de un endpoint HTTP, validando las entradas y manejando errores.
+
+1.  **Definir Esquema de Validación en `src/features/business-date-calculator/dateCalculator.schema.ts`:**
+    *   Usar `zod` para definir un esquema que valide los query params. Se añaden límites máximos para asegurar el rendimiento del algoritmo iterativo.
+        ```typescript
+        import { z } from 'zod';
+
+        export const calculationSchema = z.object({
+          // Limite de ~2 años para evitar bucles excesivos
+          days: z.coerce.number().int().min(1).max(730).optional(),
+          // Limite de ~1 año hábil en horas para evitar bucles excesivos
+          hours: z.coerce.number().int().min(1).max(2080).optional(),
+          date: z.string().datetime({ message: "Invalid ISO 8601 date format." }).optional(),
+        }).refine(data => data.days || data.hours, {
+          message: "At least one of 'days' or 'hours' must be provided.",
+        });
+        ```
+
+2.  **Implementar Controlador en `dateCalculator.controller.ts`:**
+    *   Recibirá la instancia de `IDateCalculator` en su constructor.
+    *   Tendrá un método `calculate(req, res, next)` que:
+        1.  Valida `req.query` con `calculationSchema.parse()`. Si falla, el `errorHandler` global lo atrapará.
+        2.  Determina la `startDate`: `new Date(req.query.date)` si existe, o `new Date()` si no.
+        3.  Llama a `this.dateCalculatorService.calculateBusinessDate()` con los parámetros.
+        4.  Si tiene éxito, responde con `res.status(200).json({ date: result.toISOString() })`.
+        5.  Envuelve todo en un `try...catch` y llama a `next(error)` en caso de fallo.
+
+3.  **Crear Rutas en `src/shared/web/routes/dateCalculator.routes.ts`:**
+    *   Crear un `Router` de Express.
+    *   Instanciar el controlador (esto se hará en `App.ts` y se inyectará).
+    *   Definir la ruta `GET /calculate` y asociarla al método del controlador.
+
+4.  **Configurar `App.ts` (Composition Root):**
+    *   Instanciar `HolidayApiProvider` y `DateCalculatorService`.
+    *   Inyectar el `HolidayApiProvider` en el `DateCalculatorService`.
+    *   Instanciar `DateCalculatorController` e inyectarle el servicio.
+    *   Configurar los middlewares de Express en orden: `helmet`, `pino-http`, `express-rate-limit`.
+    *   Registrar las rutas del `dateCalculator`.
+    *   Registrar el `errorHandler` global al final.
+
+5.  **Implementar `errorHandler.ts`:**
+    *   Middleware que recibe 4 argumentos `(err, req, res, next)`.
+    *   Verifica si el `err` es una instancia de `BaseError` (o de Zod) y formatea la respuesta como `{ error: err.name, message: err.message }` con el `statusCode` correspondiente.
+    *   Si no, responde con un error 500 genérico.
+
+---
+
+#### **Fase 5: Pruebas Robustas y Específicas**
+
+**Objetivo:** Garantizar la correcta implementación de la lógica de negocio mediante un conjunto de pruebas basado en los ejemplos de `Solicitud.txt`.
+
+1.  **Pruebas Unitarias (`DateCalculator.service.test.ts`):**
+    *   Se debe crear un `MockHolidayProvider` que devuelva un array fijo de festivos para los años de prueba (ej. `['2025-04-17', '2025-04-18']`).
+    *   Inyectar este mock en el `DateCalculator.service` para aislar la lógica de la llamada externa.
+    *   Implementar los siguientes casos de prueba (usando `jest` o similar):
+
+    ```typescript
+    describe('DateCalculatorService', () => {
+      // (setup del mock y el servicio aquí)
+
+      it('Ejemplo 1: Petición un viernes a las 5:00 p.m. con "hours=1"', () => {
+        // startDate: Un viernes a las 5:00 p.m. (CO)
+        // params: { hours: 1 }
+        // expected: Siguiente lunes a las 9:00 a.m. (CO)
+      });
+
+      it('Ejemplo 2: Petición un sábado a las 2:00 p.m. con "hours=1"', () => {
+        // startDate: Un sábado a las 2:00 p.m. (CO)
+        // params: { hours: 1 }
+        // expected: Siguiente lunes a las 9:00 a.m. (CO)
+      });
+
+      it('Ejemplo 3: Petición con "days=1" y "hours=4" desde un martes a las 3:00 p.m.', () => {
+        // startDate: Un martes a las 3:00 p.m. (CO)
+        // params: { days: 1, hours: 4 }
+        // expected: Jueves a las 10:00 a.m. (CO)
+        // Nota: El día se suma primero (miércoles 3pm), luego las 4 horas (2h el mié, 2h el jue).
+      });
+
+      it('Ejemplo 4: Petición con "days=1" desde un domingo a las 6:00 p.m.', () => {
+        // startDate: Un domingo a las 6:00 p.m. (CO)
+        // params: { days: 1 }
+        // expected: Lunes a las 5:00 p.m. (CO)
+        // Nota: La fecha de inicio se ajusta al viernes 5pm, luego se suma 1 día hábil.
+      });
+
+      it('Ejemplo 5: Petición con "hours=8" desde un día laboral a las 8:00 a.m.', () => {
+        // startDate: Un día laboral a las 8:00 a.m. (CO)
+        // params: { hours: 8 }
+        // expected: Mismo día a las 5:00 p.m. (CO) (8am-12pm son 4h, 1pm-5pm son 4h).
+      });
+
+      it('Ejemplo 6: Petición con "days=1" desde un día laboral a las 8:00 a.m.', () => {
+        // startDate: Un día laboral a las 8:00 a.m. (CO)
+        // params: { days: 1 }
+        // expected: Siguiente día laboral a las 8:00 a.m. (CO)
+      });
+
+      it('Ejemplo 7: Petición con "days=1" desde un día laboral a las 12:30 p.m.', () => {
+        // startDate: Un día laboral a las 12:30 p.m. (CO)
+        // params: { days: 1 }
+        // expected: Siguiente día laboral a las 12:00 p.m. (CO)
+        // Nota: La fecha de inicio se ajusta a las 12:00 p.m. antes de sumar el día.
+      });
+
+      it('Ejemplo 8: Petición con "hours=3" desde un día laboral a las 11:30 a.m.', () => {
+        // startDate: Un día laboral a las 11:30 a.m. (CO)
+        // params: { hours: 3 }
+        // expected: Mismo día a las 3:30 p.m. (CO) (30min hasta las 12, salta almuerzo, 2.5h más).
+      });
+
+      it('Ejemplo 9: Petición con festivos ("date=2025-04-10T15:00:00.000Z", "days=5", "hours=4")', () => {
+        // startDate: 2025-04-10T15:00:00.000Z (Jueves 10am CO)
+        // params: { days: 5, hours: 4 }
+        // festivos mock: 17 y 18 de abril de 2025
+        // expected: 21 de abril de 2025 a las 3:00 p.m. (CO)
+      });
+
+      it('Debe manejar correctamente los años bisiestos al sumar días', () => {
+        // startDate: 28 de febrero de 2024 a las 10:00 a.m. (CO)
+        // params: { days: 1 }
+        // expected: 29 de febrero de 2024 a las 10:00 a.m. (CO)
+      });
+    });
+    ```
+
+2.  **Pruebas de Integración (`dateCalculator.routes.test.ts`):**
+    *   Se usará `nock` (o una librería similar) para interceptar las llamadas HTTP a la API de festivos. Esto asegura que las pruebas sean rápidas, deterministas y puedan simular respuestas de error del servicio externo.
+    *   Usar `supertest` para hacer peticiones HTTP a la aplicación Express real.
+    *   Verificar que una petición sin `days` ni `hours` devuelve un error 400 con el formato `{ "error": "InvalidInputError", "message": "..." }`.
+    *   Verificar que un `date` con formato inválido devuelve un error 400.
+    *   Implementar al menos un caso de prueba complejo (ej. el Ejemplo 9) de forma E2E, verificando que la respuesta JSON final en UTC sea la correcta: `res.body.date` debe ser igual a `"2025-04-21T20:00:00.000Z"`.
+
+---
+
+#### **Fase 6: Creación de Artefactos para la Entrega**
+
+**Objetivo:** Generar todos los archivos necesarios para documentar y desplegar el proyecto.
+
+1.  **Crear `README.md`:**
+    *   **Mi Acción:** Usaré mi herramienta `write_file` para crear un archivo `README.md` en la raíz del proyecto.
+    *   **Contenido:** Lo llenaré con la estructura definida: instrucciones de instalación (`npm install`), de ejecución (`npm start`), ejemplos de `curl`, y la descripción del endpoint y sus parámetros.
+
+2.  **Crear `Dockerfile` y Archivos de Entorno:**
+    *   **Mi Acción:** Usaré `write_file` para generar un `Dockerfile` optimizado para producción (multi-etapa) y un archivo `.env.example` para listar las variables de entorno necesarias.
+
+3.  **Preparar Repositorio Local:**
+    *   **Mi Acción:** Ejecutaré `git init` y `git add .` para preparar un repositorio local con todo el código y los archivos que hemos creado. Haré un commit inicial.
+
+4.  **Subida a GitHub:**
+    *   **Tu Acción:** Crearás un repositorio público vacío en tu cuenta de GitHub.
+    *   **Mi Guía:** Te proporcionaré los comandos exactos (`git remote add origin ...` y `git push ...`) para que conectes tu repositorio local con el de GitHub y subas todos los archivos.
+
+---
+
+#### **Fase 7: Guía de Despliegue Asistido**
+
+**Objetivo:** Publicar la API en un servicio en la nube y obtener la URL final.
+
+*   **Mi Rol:** En esta fase, yo seré tu guía. Como no tengo acceso a tus cuentas, te daré instrucciones paso a paso y esperaré tu confirmación.
+
+*   **Opción A (Recomendada): Despliegue en Vercel/Render**
+    1.  **Tu Acción:** Te registrarás en Vercel (o Render) usando tu cuenta de GitHub.
+    2.  **Mi Guía:** Te indicaré cómo importar tu nuevo repositorio de GitHub en la plataforma.
+    3.  **Acción de la Plataforma:** El servicio detectará el `Dockerfile` o el `package.json` y desplegará la aplicación automáticamente.
+    4.  **Resultado:** Obtendrás la URL pública para la entrega.
+
+*   **Opción B (Bonus): Despliegue con AWS CDK**
+    *   Si eliges esta opción, la abordaremos como un sub-proyecto. Te guiaré para instalar las herramientas de CDK, escribir el código de la infraestructura en TypeScript y usar los comandos de la consola de AWS para desplegarlo.
+entrega.
+ys=5&hours=4"
+        ```
+    *   **Respuesta de Éxito:** `{"date":"2025-04-21T20:00:00.000Z"}`.
+    **Respuesta de Error:** `{"error":"InvalidParameters", "message":"..."}`.
+
+3.  **Configurar Documentación OpenAPI (Opcional pero recomendado):**
+    *   Añadir comentarios JSDoc al controlador y al esquema Zod.
+    *   Configurar `swagger-jsdoc` y `swagger-ui-express` en `App.ts` para servir la documentación interactiva en `/api-docs`.
+
+---
+
+#### **Fase 7: Despliegue**
+
+**Objetivo:** Publicar la API en un servicio accesible públicamente.
+
+1.  Elegir una plataforma (Vercel, Render, Railway, o AWS Lambda con CDK como bonus).
+2.  Configurar las variables de entorno en la plataforma.
+3.  Desplegar la aplicación y obtener la URL pública para la entrega.
+entrega.
