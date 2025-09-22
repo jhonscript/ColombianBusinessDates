@@ -44,11 +44,29 @@ Este documento es un plan de implementación paso a paso para construir la API d
         }
         ```
 
-5.  **Instalar Dependencias de Producción y Desarrollo:**
-    *   **Producción:** `npm install express date-fns date-fns-tz axios axios-retry zod dotenv pino helmet express-rate-limit`
-    *   **Desarrollo:** `npm install @types/express @types/jest jest ts-jest pino-pretty @asteasolutions/zod-to-openapi swagger-jsdoc swagger-ui-express @types/swagger-jsdoc @types/swagger-ui-express --save-dev`
+5.  **Inicializar Proyecto AWS CDK y Estructura:**
+    *   El proyecto se inicia con `cdk init app --language typescript`, lo que genera la estructura base para una aplicación CDK.
+    *   La estructura principal del proyecto es:
+        ```
+        .
+        ├── bin/              # Punto de entrada de la app CDK
+        │   └── cdk-app.ts
+        ├── lib/              # Definición de los stacks de CDK
+        │   └── cdk-stack.ts
+        ├── src/              # Código fuente de la función Lambda (lógica de negocio)
+        │   ├── domain/
+        │   ├── features/
+        │   └── shared/
+        ├── cdk.json          # Configuración de CDK
+        └── package.json
+        ```
 
-6.  **Configurar Scripts de NPM:**
+6.  **Instalar Dependencias de Producción y Desarrollo:**
+    *   **CDK y Lambda:** `npm install aws-cdk-lib constructs @types/aws-lambda @codegenie/serverless-express`
+    *   **Lógica de Negocio:** `npm install express date-fns date-fns-tz axios axios-retry zod dotenv pino helmet`
+    *   **Desarrollo:** `npm install @types/express @types/jest jest ts-jest esbuild --save-dev`
+
+7.  **Configurar Scripts de NPM:**
     *   Modificar el archivo `package.json` para añadir los scripts de ejecución y prueba:
         ```json
         "scripts": {
@@ -57,43 +75,13 @@ Este documento es un plan de implementación paso a paso para construir la API d
         }
         ```
 
-7.  **Crear Configuración de Jest:**
+8.  **Crear Configuración de Jest:**
     *   Crear un archivo `jest.config.js` para que Jest funcione con TypeScript:
         ```javascript
         module.exports = {
           preset: 'ts-jest',
           testEnvironment: 'node',
         };
-        ```
-
-8.  **Crear Estructura de Carpetas (Enfocada y Limpia):**
-    *   Esta es la estructura final, eliminando componentes no requeridos.
-        ```
-        src/
-        ├── features/
-        │   └── business-date-calculator/
-        │       ├── dateCalculator.controller.ts
-        │       └── dateCalculator.schema.ts
-        ├── domain/
-        │   ├── ports/
-        │   │   ├── IDateCalculator.ts
-        │   │   └── IHolidayProvider.ts
-        │   └── errors.ts
-        └── shared/
-            ├── infrastructure/
-            │   ├── services/
-            │   │   ├── HolidayApiProvider.ts
-            │   │   └── DateCalculator.service.ts
-            │   └── logging/
-            │       └── logger.ts
-            └── web/
-                ├── openapi/
-                │   └── swagger.config.ts
-                ├── routes/
-                │   └── dateCalculator.routes.ts
-                ├── App.ts
-                └── middlewares/
-                    └── errorHandler.ts
         ```
 
 ---
@@ -157,44 +145,15 @@ Este documento es un plan de implementación paso a paso para construir la API d
 1.  **Implementar `HolidayApiProvider.ts` en `src/shared/infrastructure/services/`:**
     *   Esta clase implementará `IHolidayProvider`.
     *   Tendrá un caché simple en memoria (`private cache: Map<number, Set<string>> = new Map();`) para evitar llamadas repetidas.
-    *   El método `getHolidays` hará lo siguiente:
-        1.  Verificar si los festivos para el `year` solicitado ya están en el `cache`. Si es así, los devuelve.
-        2.  Si no, usar `axios` (configurado con `axios-retry`) para hacer un `GET` a `https://content.capta.co/Recruitment/WorkingDays.json`.
-        3.  **Almacenar la respuesta (array de strings `YYYY-MM-DD`) en un `Set<string>` para búsquedas O(1). No se convierten a objetos `Date` para evitar problemas de zona horaria.**
-        4.  Guardar el `Set` en el `cache` usando el año como clave.
-        5.  Devolver el resultado.
-        6.  Manejar errores con la clase `HolidayApiError`. Esto incluye fallos de red y errores de validación. Para esto último, se debe usar un esquema de `zod` que valide que la respuesta de la API sea un array de strings con formato `YYYY-MM-DD`. Si la validación falla, se debe lanzar un `HolidayApiError` indicando que los datos recibidos son corruptos.
-
+    *   El método `getHolidays` usará `axios` para hacer un `GET` a la URL de la API de festivos.
+    *   Validará la respuesta de la API usando un esquema de `zod`.
+    *   **Diseño Limpio:** La URL de la API se definirá como una constante `private readonly` para facilitar su mantenimiento y evitar "magic strings".
 
 2.  **Implementar `DateCalculator.service.ts` en `src/shared/infrastructure/services/`:**
-    *   Esta clase implementará `IDateCalculator` y recibirá una instancia de `IHolidayProvider` en su constructor (Inyección de Dependencias).
-    *   El método `calculateBusinessDate` seguirá este algoritmo detallado y condicional:
-
-        1.  **Inicialización:**
-            *   Recibir `startDate` (UTC), `days` y `hours`.
-            *   Convertir `startDate` a la zona horaria de Colombia (`America/Bogota`). Esta será la `currentDate`.
-            *   Obtener los festivos para los años relevantes usando el `holidayProvider`.
-
-        2.  **Lógica de Cálculo Principal:**
-            *   **CASO A: Si `days` tiene un valor (incluso si `hours` también lo tiene):**
-                1.  **Ajuste hacia atrás:** Si `currentDate` es un momento no hábil (fin de semana, festivo, fuera de `[08:00, 17:00)`, o almuerzo `[12:00, 13:00)`), se ajusta **hacia atrás** a la última hora hábil válida (ej. 12:30pm -> 11:00am; Sábado 10am -> Viernes 4pm).
-                2.  **Suma de Días:** Iterar `days` veces. En cada iteración, avanzar 1 día en el calendario y luego usar un bucle para seguir avanzando hasta que la fecha no sea fin de semana ni festivo. La hora del día se mantiene.
-                3.  **Suma de Horas (si aplica):** Si se proporcionó `hours`, sumarlas usando el algoritmo de suma por bloques de horas a partir de la fecha resultante del paso anterior.
-
-            *   **CASO B: Si solo `hours` tiene un valor:**
-                1.  **Ajuste hacia adelante:** Si `currentDate` es un momento no hábil, se ajusta **hacia adelante** al inicio de la siguiente hora hábil disponible (ej. Viernes 5pm -> Lunes 8am; Martes 12:30pm -> Martes 1pm).
-                2.  **Suma de Horas:** Sumar las `hours` usando el algoritmo de suma por bloques a partir de la fecha ya ajustada.
-
-        3.  **Algoritmo de Suma de Horas por Bloques:**
-            *   Este sub-algoritmo se usa en los dos casos anteriores.
-            *   **Paso 1: Sumar en día actual.** Calcular las horas hábiles restantes en el día. Si las horas a sumar caben, se suman directamente, saltando el almuerzo si es necesario.
-            *   **Paso 2: Sumar días completos.** Si quedan horas, convertirlas a días hábiles (1 día = 8 horas) y avanzar esa cantidad de días hábiles.
-            *   **Paso 3: Sumar horas restantes.** Iniciar en el siguiente día hábil a las 8 a.m. y sumar las horas que queden.
-
-        4.  **Resultado Final:**
-            *   Al terminar, la `currentDate` (en zona horaria de Colombia) es el resultado.
-            *   Convertir esta `currentDate` de vuelta a UTC.
-            *   Devolver el objeto `Date` en UTC.
+    *   **Diseño Limpio:** Para asegurar la máxima claridad y mantenibilidad, la implementación seguirá los siguientes principios:
+        *   **Extracción de Constantes:** Los números que definen el horario (8, 12, 13, 17) se definirán como constantes `private readonly` con nombres claros (ej. `WORKDAY_START_HOUR`).
+        *   **División de Métodos:** La lógica compleja se dividirá en métodos privados con responsabilidades únicas (`_adjustStartDate`, `_addBusinessDays`, `_addBusinessMinutes`). El método público `calculateBusinessDate` actuará como un simple coordinador, haciendo el flujo del programa fácil de seguir.
+    *   **Lógica de Cálculo:** El método `_addBusinessMinutes` implementará el robusto enfoque de **"banco de minutos"** para asegurar la precisión en los cálculos.
 
 ---
 
@@ -232,13 +191,15 @@ Este documento es un plan de implementación paso a paso para construir la API d
     *   Instanciar el controlador (esto se hará en `App.ts` y se inyectará).
     *   Definir la ruta `GET /calculate` y asociarla al método del controlador.
 
-4.  **Configurar `App.ts` (Composition Root):**
-    *   Instanciar `HolidayApiProvider` y `DateCalculatorService`.
-    *   Inyectar el `HolidayApiProvider` en el `DateCalculatorService`.
-    *   Instanciar `DateCalculatorController` e inyectarle el servicio.
-    *   Configurar los middlewares de Express en orden: `helmet`, `pino-http`, `express-rate-limit`.
-    *   Registrar las rutas del `dateCalculator`.
-    *   Registrar el `errorHandler` global al final.
+4.  **Configurar `App.ts` (Composition Root) y `lambda.ts` (Punto de Entrada):**
+    *   **En `App.ts`:** Se realiza la "composición de objetos":
+        *   Se instancian `HolidayApiProvider` y `DateCalculatorService`.
+        *   Se inyecta el `HolidayApiProvider` en el `DateCalculatorService`.
+        *   Se instancia `DateCalculatorController` y se le inyecta el servicio.
+        *   Se configura la aplicación Express con sus middlewares (`helmet`, `pino-http`, etc.) y rutas. La app se exporta sin iniciarla (`app.listen`).
+    *   **En `src/lambda.ts`:** Este es el handler (punto de entrada) para AWS Lambda.
+        *   Importa la aplicación Express desde `App.ts`.
+        *   Utiliza `@codegenie/serverless-express` para envolver la app y exponerla como un handler que API Gateway puede invocar.
 
 5.  **Implementar `errorHandler.ts`:**
     *   Middleware que recibe 4 argumentos `(err, req, res, next)`.
@@ -254,84 +215,16 @@ Este documento es un plan de implementación paso a paso para construir la API d
 1.  **Pruebas Unitarias (`DateCalculator.service.test.ts`):**
     *   Se debe crear un `MockHolidayProvider` que devuelva un array fijo de festivos para los años de prueba (ej. `['2025-04-17', '2025-04-18']`).
     *   Inyectar este mock en el `DateCalculator.service` para aislar la lógica de la llamada externa.
-    *   Implementar los siguientes casos de prueba (usando `jest` o similar):
-
-    ```typescript
-    describe('DateCalculatorService', () => {
-      // (setup del mock y el servicio aquí)
-
-      it('Ejemplo 1: Petición un viernes a las 5:00 p.m. con "hours=1"', () => {
-        // startDate: Un viernes a las 5:00 p.m. (CO)
-        // params: { hours: 1 }
-        // expected: Siguiente lunes a las 9:00 a.m. (CO)
-      });
-
-      it('Ejemplo 2: Petición un sábado a las 2:00 p.m. con "hours=1"', () => {
-        // startDate: Un sábado a las 2:00 p.m. (CO)
-        // params: { hours: 1 }
-        // expected: Siguiente lunes a las 9:00 a.m. (CO)
-      });
-
-      it('Ejemplo 3: Petición con "days=1" y "hours=4" desde un martes a las 3:00 p.m.', () => {
-        // startDate: Un martes a las 3:00 p.m. (CO)
-        // params: { days: 1, hours: 4 }
-        // expected: Jueves a las 10:00 a.m. (CO)
-        // Nota: El día se suma primero (miércoles 3pm), luego las 4 horas (2h el mié, 2h el jue).
-      });
-
-      it('Ejemplo 4: Petición con "days=1" desde un domingo a las 6:00 p.m.', () => {
-        // startDate: Un domingo a las 6:00 p.m. (CO)
-        // params: { days: 1 }
-        // expected: Lunes a las 5:00 p.m. (CO)
-        // Nota: La fecha de inicio se ajusta al viernes 5pm, luego se suma 1 día hábil.
-      });
-
-      it('Ejemplo 5: Petición con "hours=8" desde un día laboral a las 8:00 a.m.', () => {
-        // startDate: Un día laboral a las 8:00 a.m. (CO)
-        // params: { hours: 8 }
-        // expected: Mismo día a las 5:00 p.m. (CO) (8am-12pm son 4h, 1pm-5pm son 4h).
-      });
-
-      it('Ejemplo 6: Petición con "days=1" desde un día laboral a las 8:00 a.m.', () => {
-        // startDate: Un día laboral a las 8:00 a.m. (CO)
-        // params: { days: 1 }
-        // expected: Siguiente día laboral a las 8:00 a.m. (CO)
-      });
-
-      it('Ejemplo 7: Petición con "days=1" desde un día laboral a las 12:30 p.m.', () => {
-        // startDate: Un día laboral a las 12:30 p.m. (CO)
-        // params: { days: 1 }
-        // expected: Siguiente día laboral a las 12:00 p.m. (CO)
-        // Nota: La fecha de inicio se ajusta a las 12:00 p.m. antes de sumar el día.
-      });
-
-      it('Ejemplo 8: Petición con "hours=3" desde un día laboral a las 11:30 a.m.', () => {
-        // startDate: Un día laboral a las 11:30 a.m. (CO)
-        // params: { hours: 3 }
-        // expected: Mismo día a las 3:30 p.m. (CO) (30min hasta las 12, salta almuerzo, 2.5h más).
-      });
-
-      it('Ejemplo 9: Petición con festivos ("date=2025-04-10T15:00:00.000Z", "days=5", "hours=4")', () => {
-        // startDate: 2025-04-10T15:00:00.000Z (Jueves 10am CO)
-        // params: { days: 5, hours: 4 }
-        // festivos mock: 17 y 18 de abril de 2025
-        // expected: 21 de abril de 2025 a las 3:00 p.m. (CO)
-      });
-
-      it('Debe manejar correctamente los años bisiestos al sumar días', () => {
-        // startDate: 28 de febrero de 2024 a las 10:00 a.m. (CO)
-        // params: { days: 1 }
-        // expected: 29 de febrero de 2024 a las 10:00 a.m. (CO)
-      });
-    });
-    ```
+    *   Implementar todos los casos de prueba de la solicitud para asegurar la correcta implementación de la lógica de negocio, incluyendo casos límite con festivos y precisión de minutos.
 
 2.  **Pruebas de Integración (`dateCalculator.routes.test.ts`):**
-    *   Se usará `nock` (o una librería similar) para interceptar las llamadas HTTP a la API de festivos. Esto asegura que las pruebas sean rápidas, deterministas y puedan simular respuestas de error del servicio externo.
     *   Usar `supertest` para hacer peticiones HTTP a la aplicación Express real.
-    *   Verificar que una petición sin `days` ni `hours` devuelve un error 400 con el formato `{ "error": "InvalidInputError", "message": "..." }`.
-    *   Verificar que un `date` con formato inválido devuelve un error 400.
-    *   Implementar al menos un caso de prueba complejo (ej. el Ejemplo 9) de forma E2E, verificando que la respuesta JSON final en UTC sea la correcta: `res.body.date` debe ser igual a `"2025-04-21T20:00:00.000Z"`.
+    *   Verificar que una petición sin `days` ni `hours` devuelve un error 400.
+    *   **Añadir una suite de pruebas de validación** para asegurar que la API devuelve un error `400 Bad Request` cuando se envían parámetros inválidos, tales como:
+        *   Valores negativos.
+        *   Valores flotantes.
+        *   Combinaciones de parámetros válidos e inválidos.
+    *   Implementar al menos un caso de prueba complejo de forma E2E, verificando que la respuesta JSON final en UTC sea la correcta.
 
 ---
 
@@ -343,8 +236,10 @@ Este documento es un plan de implementación paso a paso para construir la API d
     *   **Mi Acción:** Usaré mi herramienta `write_file` para crear un archivo `README.md` en la raíz del proyecto.
     *   **Contenido:** Lo llenaré con la estructura definida: instrucciones de instalación (`npm install`), de ejecución (`npm start`), ejemplos de `curl`, y la descripción del endpoint y sus parámetros.
 
-2.  **Crear `Dockerfile` y Archivos de Entorno:**
-    *   **Mi Acción:** Usaré `write_file` para generar un `Dockerfile` optimizado para producción (multi-etapa) y un archivo `.env.example` para listar las variables de entorno necesarias.
+2.  **Definir la Infraestructura como Código:**
+    *   El artefacto principal de despliegue es el archivo `lib/cdk-stack.ts`.
+    *   Este archivo define la infraestructura en AWS: una API Gateway que se integra con una Función Lambda (Node.js).
+    *   CDK se encarga de empaquetar el código de la carpeta `src/` y subirlo a Lambda, junto con la configuración de la API. No se necesita un `Dockerfile`.
 
 3.  **Preparar Repositorio Local:**
     *   **Mi Acción:** Ejecutaré `git init` y `git add .` para preparar un repositorio local con todo el código y los archivos que hemos creado. Haré un commit inicial.
@@ -355,37 +250,15 @@ Este documento es un plan de implementación paso a paso para construir la API d
 
 ---
 
-#### **Fase 7: Guía de Despliegue Asistido**
+#### **Fase 7: Despliegue con AWS CDK**
 
-**Objetivo:** Publicar la API en un servicio en la nube y obtener la URL final.
+**Objetivo:** Publicar la API en AWS y obtener la URL final.
 
-*   **Mi Rol:** En esta fase, yo seré tu guía. Como no tengo acceso a tus cuentas, te daré instrucciones paso a paso y esperaré tu confirmación.
+*   **Plataforma:** Se utiliza el AWS Cloud Development Kit (CDK) para definir y desplegar la infraestructura como código, cumpliendo con el "bonus" de la solicitud.
 
-*   **Opción A (Recomendada): Despliegue en Vercel/Render**
-    1.  **Tu Acción:** Te registrarás en Vercel (o Render) usando tu cuenta de GitHub.
-    2.  **Mi Guía:** Te indicaré cómo importar tu nuevo repositorio de GitHub en la plataforma.
-    3.  **Acción de la Plataforma:** El servicio detectará el `Dockerfile` o el `package.json` y desplegará la aplicación automáticamente.
-    4.  **Resultado:** Obtendrás la URL pública para la entrega.
-
-*   **Opción B (Bonus): Despliegue con AWS CDK**
-    *   Si eliges esta opción, la abordaremos como un sub-proyecto. Te guiaré para instalar las herramientas de CDK, escribir el código de la infraestructura en TypeScript y usar los comandos de la consola de AWS para desplegarlo.
-entrega.
-ys=5&hours=4"
-        ```
-    *   **Respuesta de Éxito:** `{"date":"2025-04-21T20:00:00.000Z"}`.
-    **Respuesta de Error:** `{"error":"InvalidParameters", "message":"..."}`.
-
-3.  **Configurar Documentación OpenAPI (Opcional pero recomendado):**
-    *   Añadir comentarios JSDoc al controlador y al esquema Zod.
-    *   Configurar `swagger-jsdoc` y `swagger-ui-express` en `App.ts` para servir la documentación interactiva en `/api-docs`.
-
----
-
-#### **Fase 7: Despliegue**
-
-**Objetivo:** Publicar la API en un servicio accesible públicamente.
-
-1.  Elegir una plataforma (Vercel, Render, Railway, o AWS Lambda con CDK como bonus).
-2.  Configurar las variables de entorno en la plataforma.
-3.  Desplegar la aplicación y obtener la URL pública para la entrega.
-entrega.
+*   **Proceso de Despliegue:**
+    1.  **Configurar Credenciales:** Asegurarse de tener las credenciales de AWS configuradas en el entorno local (ej. vía `aws configure`).
+    2.  **Instalar Dependencias:** Ejecutar `npm install` en la raíz del proyecto.
+    3.  **Bootstrap CDK (si es la primera vez):** Ejecutar `cdk bootstrap` para preparar el entorno de AWS para recibir stacks de CDK.
+    4.  **Sintetizar y Desplegar:** Ejecutar el comando `cdk deploy`. CDK compilará el código TypeScript, generará una plantilla de CloudFormation y desplegará todos los recursos (API Gateway, Lambda, etc.) en la cuenta de AWS.
+    5.  **Obtener la URL:** Al finalizar el despliegue, CDK mostrará la URL del endpoint de la API Gateway en la sección de "Outputs" de la terminal. Esta es la URL pública de la API.

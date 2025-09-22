@@ -7,8 +7,8 @@ import { z } from 'zod';
 const holidayResponseSchema = z.array(z.string().regex(/^\d{4}-\d{2}-\d{2}$/));
 
 export class HolidayApiProvider implements IHolidayProvider {
-  private cache: Map<number, Set<string>> = new Map();
   private readonly HOLIDAY_API_URL = 'https://content.capta.co/Recruitment/WorkingDays.json';
+  private cache: Map<number, Set<string>> = new Map();
 
   async getHolidays(year: number): Promise<Set<string>> {
     if (this.cache.has(year)) {
@@ -16,9 +16,7 @@ export class HolidayApiProvider implements IHolidayProvider {
     }
 
     try {
-      const response = await axios.get<string[]>(this.HOLIDAY_API_URL, {
-        // Axios-retry está configurado globalmente si es necesario, o se puede configurar aquí
-      });
+      const response = await axios.get<string[]>(this.HOLIDAY_API_URL);
 
       const validation = holidayResponseSchema.safeParse(response.data);
 

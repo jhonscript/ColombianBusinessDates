@@ -1,3 +1,10 @@
 /node_modules
 /dist
 .env
+
+# Deployment artifacts
+deployment.zip
+deployment_package/
+
+# CDK output directory
+cdk.out/

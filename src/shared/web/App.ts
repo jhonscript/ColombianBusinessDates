@@ -27,11 +27,12 @@ app.use('/', apiRouter);
 // Middleware de manejo de errores (debe ser el último)
 app.use(errorHandler);
 
-// --- Server Initialization ---
-const PORT = process.env.PORT || 3000;
+// --- Server Initialization (for local development only) ---
+if (require.main === module) {
+  const PORT = process.env.PORT || 3000;
+  app.listen(PORT, () => {
+    console.log(`Server is running on port ${PORT}`);
+  });
+}
 
-app.listen(PORT, () => {
-  console.log(`Server is running on port ${PORT}`);
-});
-
-export default app; // Exportar para pruebas de integración
+export default app; // Exportar para pruebas de integración y para el handler de Lambda
